@@ -265,6 +265,7 @@ struct PotreeNodes{
 //       Requires GPU access to pageable host memory (e.g. HMM on linux).
 //     - Direct storage: Visible nodes are read from octree.bin into VRAM via cuFile each frame, 
 //       without caching, and rendered from there.
+// - With CuRastSettings::updateLod disabled, the nodes of the last traversal are selected again, without traversing. 
 PotreeNodes selectPotreeNodes(Scene* scene, View view, const RenderTarget& target){
 
 	u64 pointBudget = CuRastSettings::pointBudget;
@@ -389,18 +390,6 @@ PotreeNodes selectPotreeNodes(Scene* scene, View view, const RenderTarget& targe
 	auto smallerScreenSize = [](const QueueItem& a, const QueueItem& b){ return a.screenSize < b.screenSize; };
 	std::priority_queue<QueueItem, vector<QueueItem>, decltype(smallerScreenSize)> queue(smallerScreenSize);
 
-	for(i32 stateIndex = 0; stateIndex < states.size(); stateIndex++){
-		const FileState& state = states[stateIndex];
-		const PotreeHierarchyNode& root = state.file->hierarchyNodes[0];
-		dvec3 min = root.min - state.center;
-		dvec3 max = root.max - state.center;
-
-		if(!isInsideFrustum(state, min, max)) continue;
-
-		queue.push({stateIndex, 0, getScreenSize(state, min, max)});
-	}
-
-	// Traverse from largest to smallest nodes in screen space, until the point budget is reached
 	static vector<PotreeNode> visibleNodes;
 	visibleNodes.clear();
 	u64 numVisiblePoints = 0;
@@ -410,18 +399,13 @@ PotreeNodes selectPotreeNodes(Scene* scene, View view, const RenderTarget& targe
 	reads.clear();
 	u64 numReadBytes = 0;
 
-	while(!queue.empty()){
-		QueueItem item = queue.top();
-		queue.pop();
-
-		FileState& state = states[item.stateIndex];
+	// Adds a node to the visible nodes, and with direct storage, its read. 
+	// Returns false if it does not fit into the point budget or directStorageBuffer anymore.
+	auto addVisibleNode = [&](const FileState& state, i32 nodeIndex) -> bool {
 		PotreeFileNode* file = state.file;
+		const PotreeHierarchyNode& node = file->hierarchyNodes[nodeIndex];
 
-		// proxies only know their point count, not yet where their points are
-		file->loadHierarchyChunk(item.nodeIndex);
-		const PotreeHierarchyNode& node = file->hierarchyNodes[item.nodeIndex];
-
-		if(numVisiblePoints + node.numPoints > pointBudget) break;
+		if(numVisiblePoints + node.numPoints > pointBudget) return false;
 
 		PotreeNode visibleNode;
 
@@ -431,7 +415,7 @@ PotreeNodes selectPotreeNodes(Scene* scene, View view, const RenderTarget& targe
 			u64 alignedEnd   = ((node.byteOffset + node.byteSize + DIRECT_STORAGE_PAGE_SIZE - 1) / DIRECT_STORAGE_PAGE_SIZE) * DIRECT_STORAGE_PAGE_SIZE;
 			u64 paddedSize   = alignedEnd - alignedStart;
 
-			if(numReadBytes + paddedSize > directStorageBuffer.size) break;
+			if(numReadBytes + paddedSize > directStorageBuffer.size) return false;
 
 			DirectStorageRead read;
 			read.file         = state.cuFileHandle;
@@ -458,16 +442,71 @@ PotreeNodes selectPotreeNodes(Scene* scene, View view, const RenderTarget& targe
 		visibleNode.offset          = vec3(file->offset - state.center);
 		visibleNodes.push_back(visibleNode);
 
-		for(i32 childIndex : node.children){
-			if(childIndex < 0) continue;
+		return true;
+	};
 
-			const PotreeHierarchyNode& child = file->hierarchyNodes[childIndex];
-			dvec3 min = child.min - state.center;
-			dvec3 max = child.max - state.center;
+	// The nodes that the last traversal selected. They are drawn again while CuRastSettings::updateLod is disabled.
+	struct SelectedNode{
+		PotreeFileNode* file;
+		i32 nodeIndex;
+	};
+	static vector<SelectedNode> selectedNodes;
+	static bool hasSelection = false;
+
+	if(CuRastSettings::updateLod || !hasSelection){
+		selectedNodes.clear();
+		hasSelection = true;
+
+		for(i32 stateIndex = 0; stateIndex < states.size(); stateIndex++){
+			const FileState& state = states[stateIndex];
+			const PotreeHierarchyNode& root = state.file->hierarchyNodes[0];
+			dvec3 min = root.min - state.center;
+			dvec3 max = root.max - state.center;
 
 			if(!isInsideFrustum(state, min, max)) continue;
 
-			queue.push({item.stateIndex, childIndex, getScreenSize(state, min, max)});
+			queue.push({stateIndex, 0, getScreenSize(state, min, max)});
+		}
+
+		// Traverse from largest to smallest nodes in screen space, until the point budget is reached
+		while(!queue.empty()){
+			QueueItem item = queue.top();
+			queue.pop();
+
+			const FileState& state = states[item.stateIndex];
+			PotreeFileNode* file = state.file;
+
+			// proxies only know their point count, not yet where their points are
+			file->loadHierarchyChunk(item.nodeIndex);
+
+			if(!addVisibleNode(state, item.nodeIndex)) break;
+			selectedNodes.push_back({file, item.nodeIndex});
+
+			const PotreeHierarchyNode& node = file->hierarchyNodes[item.nodeIndex];
+			for(i32 childIndex : node.children){
+				if(childIndex < 0) continue;
+
+				const PotreeHierarchyNode& child = file->hierarchyNodes[childIndex];
+				dvec3 min = child.min - state.center;
+				dvec3 max = child.max - state.center;
+
+				if(!isInsideFrustum(state, min, max)) continue;
+
+				queue.push({item.stateIndex, childIndex, getScreenSize(state, min, max)});
+			}
+		}
+	}else{
+		// the nodes of the last traversal, unless their file is not drawn anymore
+		for(const SelectedNode& selected : selectedNodes){
+			const FileState* state = nullptr;
+			for(const FileState& candidate : states){
+				if(candidate.file == selected.file) state = &candidate;
+			}
+
+			if(state == nullptr) continue;
+			if(selected.nodeIndex >= state->file->hierarchyNodes.size()) continue;
+
+			if(!addVisibleNode(*state, selected.nodeIndex)) break;
 		}
 	}
 
@@ -709,6 +748,7 @@ struct MappedFileTraffic{
 //       The BVH traversal reads nodes, groups and clusters from RAM.
 //     - Memory-mapped: The kernels read them directly from the memory-mapped files, and so does the BVH traversal.
 //       Requires GPU access to pageable host memory (e.g. HMM on linux). The overlay shows how much is read from each file.
+// - With CuRastSettings::updateLod disabled, the clusters of the last selection are drawn again, without selecting.
 void drawClusteredMeshes(Scene* scene, View view, RenderTarget& target){
 
 	bool memoryMapped = CuRastSettings::clusterRenderPath == CLUSTERS_MEMORY_MAPPED;
@@ -730,6 +770,7 @@ void drawClusteredMeshes(Scene* scene, View view, RenderTarget& target){
 		u32 numVisibleClusters;
 		BvhTraversal traversal;
 		ClusterCounters counters;
+		u64 testedClusters;       // cluster records read by the selection
 	};
 	vector<DrawnMesh> drawnMeshes;
 	u32 visibleOffset = 0;
@@ -794,11 +835,15 @@ void drawClusteredMeshes(Scene* scene, View view, RenderTarget& target){
 
 		BvhTraversal traversal;
 		ClusterCounters counters = {};
+		u64 testedClusters = 0;
 
 		// the shading kernel accumulates its texture estimate in the counters
 		cudaMemsetAsync(node->gpu_counters, 0, sizeof(ClusterCounters));
 
-		if(useBvh){
+		if(!CuRastSettings::updateLod && node->hasSelection){
+			// gpu_visibleClusters still holds the clusters of the last selection
+			counters = node->selection;
+		}else if(useBvh){
 			double tStart = now();
 
 			static vector<u32> visibleClusters;
@@ -807,6 +852,7 @@ void drawClusteredMeshes(Scene* scene, View view, RenderTarget& target){
 			cudaMemcpy(node->gpu_visibleClusters, visibleClusters.data(), byteSizeOf(visibleClusters), cudaMemcpyHostToDevice);
 
 			counters = {u32(visibleClusters.size()), u32(traversal.visibleTriangles), u32(traversal.visibleVertices), 0.0f, 0};
+			testedClusters = traversal.testedClusters;
 			bvhMilliseconds += (now() - tStart) * 1000.0;
 			numVisitedNodes += traversal.visitedNodes;
 		}else{
@@ -814,7 +860,11 @@ void drawClusteredMeshes(Scene* scene, View view, RenderTarget& target){
 
 			// the number of visible clusters, to give the next mesh's triangle IDs an offset
 			cudaMemcpy(&counters, node->gpu_counters, sizeof(counters), cudaMemcpyDeviceToHost);
+			testedClusters = mesh.numClusters;
 		}
+
+		node->selection = counters;
+		node->hasSelection = true;
 
 		numVisibleClusters += counters.numVisibleClusters;
 		numVisibleTriangles += counters.numVisibleTriangles;
@@ -829,7 +879,7 @@ void drawClusteredMeshes(Scene* scene, View view, RenderTarget& target){
 
 		launch_drawClusters(target, mesh, node->gpu_visibleClusters, numDrawn, visibleOffset);
 
-		drawnMeshes.push_back({node, mesh, visibleOffset, numDrawn, traversal, counters});
+		drawnMeshes.push_back({node, mesh, visibleOffset, numDrawn, traversal, counters, testedClusters});
 		visibleOffset += numDrawn;
 		hasClusteredMeshes = true;
 	});
@@ -854,7 +904,7 @@ void drawClusteredMeshes(Scene* scene, View view, RenderTarget& target){
 		// visible ones read by kernel_drawClusters. kernel_shadeClusters reads a subset of the latter, and of the 
 		// positions and triangles that kernel_drawClusters reads. Only kernel_shadeClusters reads uvs.
 		const ClusterCounters& counters = drawn.counters;
-		u64 clusterRecords = (useBvh ? drawn.traversal.testedClusters : drawn.mesh.numClusters) + counters.numVisibleClusters;
+		u64 clusterRecords = drawn.testedClusters + counters.numVisibleClusters;
 
 		addTraffic(node->mapped_nodes, drawn.traversal.visitedNodes * sizeof(ClusterBvhNode), true);
 		addTraffic(node->mapped_groups, drawn.traversal.visitedGroups * sizeof(ClusterGroup), true);

@@ -245,6 +245,10 @@ void CuRast::makeToolbar(){
 				ImGui::SliderFloat("LOD Error", &CuRastSettings::lodErrorThreshold, 0.1f, 32.0f, "%.1f px", ImGuiSliderFlags_Logarithmic);
 				if(ImGui::IsItemHovered()) ImGui::SetTooltip("Clustered LOD meshes: Maximum projected simplification error, in pixels.");
 
+				ImGui::SameLine();
+				ImGui::Checkbox("Update LOD", &CuRastSettings::updateLod);
+				if(ImGui::IsItemHovered()) ImGui::SetTooltip("If disabled, keeps the currently selected Potree octree nodes and clusters of clustered LOD meshes, e.g. to inspect them from other viewpoints.");
+
 				ImGui::Text("Potree: ");
 				ImGui::SameLine();
 				ImGui::RadioButton("Memory-mapped##potreeRenderPath", &CuRastSettings::potreeRenderPath, POTREE_MEMORY_MAPPED);

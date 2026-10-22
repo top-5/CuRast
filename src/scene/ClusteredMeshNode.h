@@ -98,6 +98,8 @@ struct ClusteredMeshNode : public SceneNode{
 	u8* gpu_triangles = nullptr;
 	u8* gpu_texture = nullptr;           // the blocks of all levels, without the dds header
 	u32* gpu_visibleClusters = nullptr;  // indices of the clusters selected for the current frame
+	ClusterCounters selection = {};      // number of clusters, triangles and vertices in gpu_visibleClusters
+	bool hasSelection = false;           // whether gpu_visibleClusters holds a selection, e.g. to keep it (CuRastSettings::updateLod)
 	ClusterCounters* gpu_counters = nullptr;
 	u32* gpu_uvVertexMask = nullptr;     // see getUvVertexMask()
 	u64 uvVertexMaskWords = 0;

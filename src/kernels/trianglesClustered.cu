@@ -53,11 +53,15 @@ constexpr int CLUSTER_BLOCK_SIZE = 128;
 // 16 was the fastest of 4 to 128 pixels on odm_wietrznia (RTX 4090), both for distant and close views.
 constexpr int MAX_THREAD_TRIANGLE_PIXELS = 16;
 
-__constant__ u32 LEVEL_COLORS[] = {
-	0xff4b19e6, 0xff4bb43c, 0xff19e1ff, 0xffc88200, 0xff3082f5, 0xffb41e91, 0xfff0f046, 0xffe632f0,
-	0xff3cf5d2, 0xffd4befa, 0xff808000, 0xffffbedc, 0xff286eaa, 0xffc8faff, 0xff000080, 0xffc3ffaa,
-	0xff008080, 0xffb4d7ff, 0xff800000, 0xff808080,
+// Colors of the LOD levels, from level 0 (the original mesh) upwards (ColorBrewer's "Spectral"). RGBA8
+constexpr int NUM_LEVEL_COLORS = 11;
+__constant__ u32 LEVEL_COLORS[NUM_LEVEL_COLORS] = {
+	0xff42019e, 0xff4f3ed5, 0xff436df4, 0xff61aefd, 0xff8be0fe, 0xffbfffff,
+	0xff98f5e6, 0xffa4ddab, 0xffa5c266, 0xffbd8832, 0xffa24f5e,
 };
+
+// Color of the levels beyond LEVEL_COLORS (magenta)
+constexpr u32 HIGHER_LEVEL_COLOR = 0xffff00ff;
 
 // Approximate screen-space size of an error, in pixels. See tools/clodbuilder/README.md
 __device__ float projectedError(vec4 sphere, float error, const ClusteredMesh& mesh, const RenderTarget& target){
@@ -392,7 +396,7 @@ void kernel_shadeClusters(
 
 		u32 color = 0xff888888;
 		if(mesh.colorMode == CLUSTER_COLOR_LEVEL){
-			color = LEVEL_COLORS[cluster.level % 20];
+			color = cluster.level < NUM_LEVEL_COLORS ? LEVEL_COLORS[cluster.level] : HIGHER_LEVEL_COLOR;
 		}else if(mesh.colorMode == CLUSTER_COLOR_CLUSTER){
 			color = (clusterIndex * 2654435761u) | 0xff000000;
 		}else if(textured){
