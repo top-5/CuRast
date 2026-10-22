@@ -28,8 +28,45 @@ struct OrbitControls{
 
 	glm::dvec2 mousePos;
 
+	// Animated move of target and radius, see moveTo(). Stops when a mouse button is pressed or the wheel is used.
+	struct Transition{
+		bool active = false;
+		glm::dvec3 startTarget;
+		glm::dvec3 endTarget;
+		double startRadius;
+		double endRadius;
+		double startTime;  // seconds
+		double duration;   // seconds
+	};
+	Transition transition;
+
 	OrbitControls(){
 	
+	}
+
+	// Moves target and radius to the given values within <duration> seconds, starting at time <now>. 
+	// Yaw and pitch, i.e., the view direction, stay the same, so the camera moves along a straight line.
+	void moveTo(glm::dvec3 newTarget, double newRadius, double now, double duration){
+		transition.active      = true;
+		transition.startTarget = target;
+		transition.endTarget   = newTarget;
+		transition.startRadius = radius;
+		transition.endRadius   = newRadius;
+		transition.startTime   = now;
+		transition.duration    = duration;
+	}
+
+	// Sets target and radius for time <now> of an active transition
+	void updateTransition(double now){
+		if(!transition.active) return;
+
+		double t = glm::clamp((now - transition.startTime) / transition.duration, 0.0, 1.0);
+		double eased = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t); // ease out (cubic)
+
+		target = glm::mix(transition.startTarget, transition.endTarget, eased);
+		radius = glm::mix(transition.startRadius, transition.endRadius, eased);
+
+		if(t >= 1.0) transition.active = false;
 	}
 
 	glm::dvec3 getDirection(){
@@ -83,6 +120,8 @@ struct OrbitControls{
 	void onMouseButton(int button, int action, int mods){
 		//cout << "button: " << button << ", action: " << action << ", mods: " << mods << endl;
 
+		if(action == 1) transition.active = false;
+
 		if(button == 0 && action == 1){
 			isLeftDown = true;
 		}else if(action == 0){
@@ -124,6 +163,8 @@ struct OrbitControls{
 
 		// +1: zoom in
 		// -1: zoom out
+
+		if(yoffset != 0.0) transition.active = false;
 
 		if(yoffset < -0.0f){
 			radius = radius * 1.1;

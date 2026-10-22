@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+
 struct MouseEvents{
 	float wheel_x = 0;
 	float wheel_y = 0;
@@ -18,7 +20,18 @@ struct MouseEvents{
 	bool isRightDown = false;
 	bool hasEvent = false;
 
-	
+	// Double-click: two presses of the left button, at most 0.3s and 4 pixels apart. 
+	// doubleClicked is set for the frame of the second press.
+	bool doubleClicked = false;
+	double lastLeftPressTime = -1.0;
+	float lastLeftPress_x = 0;
+	float lastLeftPress_y = 0;
+
+	static double seconds(){
+		auto sinceEpoch = std::chrono::steady_clock::now().time_since_epoch();
+		return std::chrono::duration<double>(sinceEpoch).count();
+	}
+
 
 	void onMouseButton(int button, int action, int mods){
 
@@ -28,6 +41,20 @@ struct MouseEvents{
 
 		if(button == 0 && action == 1){
 			isLeftDown = true;
+
+			double time = seconds();
+			float dx = pos_x - lastLeftPress_x;
+			float dy = pos_y - lastLeftPress_y;
+			bool isSecondClick = time - lastLeftPressTime <= 0.3 && dx * dx + dy * dy <= 4.0f * 4.0f;
+
+			if(isSecondClick){
+				doubleClicked = true;
+				lastLeftPressTime = -1.0; // a third click starts a new double-click
+			}else{
+				lastLeftPressTime = time;
+				lastLeftPress_x = pos_x;
+				lastLeftPress_y = pos_y;
+			}
 		}else if(action == 0){
 			isLeftDown = false;
 		}
@@ -89,5 +116,6 @@ struct MouseEvents{
 		buttonPressed = false;
 		mouseMoved = false;
 		mouseScrolled = false;
+		doubleClicked = false;
 	}
 };

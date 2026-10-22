@@ -2,6 +2,7 @@
 #include <execution>
 #include <queue>
 #include <atomic>
+#include <optional>
 
 #include "CuRast.h"
 #include "VKRenderer.h"
@@ -24,10 +25,100 @@ void CuRast::resetEditor(){
 }
 
 
+// The last frame's view and render target. Its colorbuffer stays intact until the next frame clears it, 
+// so that input handling can pick positions in it.
+struct LastFrame{
+	bool valid = false;
+	dmat4 view;
+	dmat4 proj;
+	RenderTarget target;
+	int supersamplingFactor;
+};
+LastFrame lastFrame;
+
+// World position of the closest surface near pixel (x, y) of the window, from the top left, in the last frame. 
+// Searches up to 5 pixels around it, as point clouds have gaps, and picks the pixel nearest to (x, y).
+std::optional<dvec3> pickLastFrame(int x, int y){
+	if(!lastFrame.valid) return std::nullopt;
+
+	const RenderTarget& target = lastFrame.target;
+	int factor = lastFrame.supersamplingFactor;
+
+	// in the render target, with rows from the bottom
+	int centerX = x * factor + factor / 2;
+	int centerY = target.height - 1 - (y * factor + factor / 2);
+	int searchRadius = 5 * factor;
+
+	int x0 = std::max(centerX - searchRadius, 0);
+	int y0 = std::max(centerY - searchRadius, 0);
+	int x1 = std::min(centerX + searchRadius, target.width - 1);
+	int y1 = std::min(centerY + searchRadius, target.height - 1);
+	if(x0 > x1 || y0 > y1) return std::nullopt;
+
+	int windowWidth = x1 - x0 + 1;
+	int windowHeight = y1 - y0 + 1;
+	vector<u64> pixels(windowWidth * windowHeight);
+	cudaMemcpy2D(
+		pixels.data(), windowWidth * sizeof(u64), 
+		target.colorbuffer + x0 + u64(target.width) * y0, target.width * sizeof(u64), 
+		windowWidth * sizeof(u64), windowHeight, cudaMemcpyDeviceToHost);
+
+	// depth is in the upper 32 bits, and infinite for the background
+	int pickedX = -1;
+	int pickedY = -1;
+	float pickedDepth = Infinity;
+	int pickedDistance = std::numeric_limits<int>::max();
+	for(int py = y0; py <= y1; py++)
+	for(int px = x0; px <= x1; px++){
+		float depth = __builtin_bit_cast(float, u32(pixels[(px - x0) + windowWidth * (py - y0)] >> 32));
+		if(std::isinf(depth)) continue;
+
+		int distance = (px - centerX) * (px - centerX) + (py - centerY) * (py - centerY);
+		if(distance < pickedDistance || (distance == pickedDistance && depth < pickedDepth)){
+			pickedX = px;
+			pickedY = py;
+			pickedDepth = depth;
+			pickedDistance = distance;
+		}
+	}
+
+	if(pickedX < 0) return std::nullopt;
+
+	// The kernels store view depth, i.e., clip.w. With our projection, clip.xy = proj[0][0] * x, proj[1][1] * y.
+	double ndcX = 2.0 * (double(pickedX) + 0.5) / double(target.width) - 1.0;
+	double ndcY = 2.0 * (double(pickedY) + 0.5) / double(target.height) - 1.0;
+	dvec4 viewPos = {
+		ndcX * pickedDepth / lastFrame.proj[0][0],
+		ndcY * pickedDepth / lastFrame.proj[1][1],
+		-double(pickedDepth),
+		1.0
+	};
+
+	return dvec3(inverse(lastFrame.view) * viewPos);
+}
+
+// Double-click zoom: moves the orbit target to the surface under the mouse, and the camera to a quarter of its 
+// distance to it, keeping the view direction. Animated over 0.4 seconds.
+void zoomToMouse(){
+	std::optional<dvec3> point = pickLastFrame(int(Runtime::mousePosition.x), int(Runtime::mousePosition.y));
+	if(!point) return;
+
+	OrbitControls* controls = Runtime::controls;
+	dvec3 cameraPosition = dvec3(controls->world[3]);
+	double distance = glm::length(*point - cameraPosition);
+
+	controls->moveTo(*point, 0.25 * distance, now(), 0.4);
+}
+
 void CuRast::inputHandling(){
+
+	if(Runtime::mouseEvents.doubleClicked){
+		zoomToMouse();
+	}
 
 	Runtime::controls->onMouseMove(Runtime::mouseEvents.pos_x, Runtime::mouseEvents.pos_y);
 	Runtime::controls->onMouseScroll(Runtime::mouseEvents.wheel_x, Runtime::mouseEvents.wheel_y);
+	Runtime::controls->updateTransition(now());
 	Runtime::controls->update();
 
 	VKRenderer::camera->view = inverse(Runtime::controls->world);
@@ -1248,6 +1339,12 @@ void CuRast::draw(Scene* scene, vector<View> views){
 	}
 
 	unmapCudaVk(mappings);
+
+	lastFrame.valid = true;
+	lastFrame.view = view.view;
+	lastFrame.proj = view.proj;
+	lastFrame.target = target;
+	lastFrame.supersamplingFactor = supersamplingFactor;
 
 	if(requestTdCapture){
 		captureTd(scene, view);
