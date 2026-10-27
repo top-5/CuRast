@@ -60,7 +60,9 @@ Compile and run with visual Studio 2026. Drag and drop glb or gltf files to load
 
 ### Linux
 
-TODO. 
+This fork includes a portable headless CUDA visibility target, tested separately from the desktop viewer. See [headless/README.md](headless/README.md) for build commands, GPU tests and scope.
+
+The full desktop viewer remains unported.
 
 Main challenge: We're using the windows API for [memory mapping](./src/MappedFile.h) (easily read from files) and [unbuffered IO](./src/unsuck_platform_specific.cpp#L242) (efficiently read from files). mmap on linux should be straightforward, but what about fast sequential SSD reads without buffering overhead? io_uring?
 

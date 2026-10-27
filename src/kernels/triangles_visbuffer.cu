@@ -544,6 +544,9 @@ void stage2_drawMediumTriangles(RasterArgs& args) {
 
 				uint32_t idx = atomicAdd(args.hugeTrianglesCounter, numTiles);
 				for (uint32_t i = 0; i < numTiles; i++) {
+#ifdef CURAST_HEADLESS_QUEUE_GUARDS
+					if (idx + i >= MAX_HUGE_TRIANGLES) break;
+#endif
 					HugeTriangle tri;
 					tri.meshIndex = meshIndex;
 					tri.triangleIndex = triangleIndex;
@@ -645,6 +648,9 @@ void stage3_drawHugeTriangles(RasterArgs args){
 		block.sync();
 
 		if(hugeTriIndex >= *args.hugeTrianglesCounter) return;
+#ifdef CURAST_HEADLESS_QUEUE_GUARDS
+		if(hugeTriIndex >= MAX_HUGE_TRIANGLES) return;
+#endif
 
 		HugeTriangle tri = args.hugeTriangles[hugeTriIndex];
 		CMesh mesh = args.instances[tri.meshIndex];

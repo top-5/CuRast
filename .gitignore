@@ -522,3 +522,7 @@ make.bat
 dbg.glb.json
 screenshots/*
 benchmarks/*
+
+# Portable headless build products
+build*/
+*.ptx

@@ -1,5 +1,21 @@
 cmake_minimum_required(VERSION 3.5)
 
+# The CUDA visibility core can run without the Windows/Vulkan viewer.
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+	set(CURAST_HEADLESS_DEFAULT ON)
+else()
+	set(CURAST_HEADLESS_DEFAULT OFF)
+endif()
+option(CURAST_HEADLESS_ONLY "Build the portable CUDA visibility runner" ${CURAST_HEADLESS_DEFAULT})
+if(CURAST_HEADLESS_ONLY)
+	cmake_minimum_required(VERSION 3.24)
+	project(CuRastHeadless LANGUAGES CXX)
+	find_package(CUDAToolkit 13.0 REQUIRED)
+	include(CTest)
+	add_subdirectory(headless)
+	return()
+endif()
+
 set(TARGET_NAME CuRast) 
 project(${TARGET_NAME} LANGUAGES CXX CUDA)
 set(CMAKE_CXX_STANDARD 23)
