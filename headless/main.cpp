@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -52,7 +53,8 @@ std::string readText(const fs::path& path) {
 }
 struct Options {
     fs::path input, output, report, dump;
-    int resolution = 512, repeat = 31, device = 0;
+    int resolution = 512, repeat = 31, device = 0, frames = 1;
+    float azimuth = 0;
     bool selfTest = false, help = false;
 };
 Options parse(int argc, char** argv) {
@@ -70,6 +72,8 @@ Options parse(int argc, char** argv) {
         else if (arg == "--resolution") options.resolution = std::stoi(value);
         else if (arg == "--repeat") options.repeat = std::stoi(value);
         else if (arg == "--device") options.device = std::stoi(value);
+        else if (arg == "--frames") options.frames = std::stoi(value);
+        else if (arg == "--azimuth") options.azimuth = std::stof(value);
         else throw std::runtime_error("Unknown argument " + arg);
     }
     if (options.help) return options;
@@ -77,6 +81,9 @@ Options parse(int argc, char** argv) {
         throw std::runtime_error("Choose exactly one of --input static.glb or --self-test");
     if (options.resolution < 64 || options.resolution > 4096 || options.repeat < 1 || options.repeat > 1000)
         throw std::runtime_error("Resolution must be64..4096 and repeat1..1000");
+    if (options.frames < 1 || options.frames > 360 || !std::isfinite(options.azimuth))
+        throw std::runtime_error("Frames must be1..360; finite azimuth required");
+    if (options.selfTest && options.frames != 1) throw std::runtime_error("Self-test requires one frame");
     if (options.selfTest && options.resolution != 512)
         throw std::runtime_error("The three-stage fixture requires resolution512");
     for (const auto& output : {options.output, options.report, options.dump}) {
@@ -154,6 +161,15 @@ Scene loadScene(const fs::path& path) {
                     mesh.indices.resize(accessor.count);
                     std::iota(mesh.indices.begin(), mesh.indices.end(), 0u);
                 }
+                if (primitive.materialIndex && asset.materials[*primitive.materialIndex].doubleSided) {
+                    const auto original = mesh.indices.size();
+                    mesh.indices.reserve(original * 2);
+                    for (size_t i=0; i<original; i+=3) {
+                        mesh.indices.push_back(mesh.indices[i]);
+                        mesh.indices.push_back(mesh.indices[i+2]);
+                        mesh.indices.push_back(mesh.indices[i+1]);
+                    }
+                }
                 if (mesh.indices.empty() || mesh.indices.size() % 3)
                     throw std::runtime_error("Invalid triangle index count");
                 if (*std::max_element(mesh.indices.begin(), mesh.indices.end()) >= mesh.positions.size())
@@ -191,7 +207,13 @@ struct Allocations {
 struct Module {
     CUmodule value = nullptr;
     double compileSeconds = 0;
+    bool cacheHit = false;
     Module(const cudaDeviceProp& device) {
+        const char* cache = std::getenv("SEED_CURAST_PTX_CACHE");
+        if (cache && fs::is_regular_file(cache) && cuModuleLoad(&value, cache) == CUDA_SUCCESS) {
+            cacheHit = true; return;
+        }
+
         const std::string source = readText(fs::path(CURAST_SOURCE_DIR) / "src/kernels/triangles_visbuffer.cu");
         nvrtcProgram program;
         check(nvrtcCreateProgram(&program, source.c_str(), "triangles_visbuffer.cu", 0, nullptr, nullptr));
@@ -220,6 +242,16 @@ struct Module {
         check(nvrtcGetPTX(program, ptx.data()));
         check(nvrtcDestroyProgram(&program));
         check(cuModuleLoadData(&value, ptx.data()));
+        if (cache) {
+            try {
+                const fs::path path(cache);
+                fs::create_directories(path.parent_path());
+                const auto temporary = fs::path(path.string()+".tmp."+std::to_string(Clock::now().time_since_epoch().count()));
+                std::ofstream output(temporary, std::ios::binary);
+                output.write(ptx.data(), std::streamsize(ptx.size()));output.close();
+                if (output) fs::rename(temporary,path); else fs::remove(temporary);
+            } catch (const fs::filesystem_error&) { /* cache is optional; inference succeeded */ }
+        }
     }
     ~Module() { if (value) cuModuleUnload(value); }
 };
@@ -296,7 +328,29 @@ Json render(const Scene& scene, const Options& options) {
     check(cudaEventCreate(&start)); check(cudaEventCreate(&end));
     std::vector<float> timings;
     void* parameters[] = {&args};
-    for (int repeat = -2; repeat < options.repeat; ++repeat) {
+    uint64_t covered = 0; uint32_t medium = 0, huge = 0; bool correct = true;
+    Json cameras = Json::array();
+    std::ofstream sequence;
+    if (!options.dump.empty()) {
+        sequence.open(options.dump, std::ios::binary);
+        if (!sequence) throw std::runtime_error("Cannot open visibility sequence");
+    }
+    for (int frame = 0; frame < options.frames; ++frame) {
+        const float angle = glm::radians(options.azimuth + 360.f * frame / options.frames);
+        if (!scene.fixture) {
+            const auto center = (scene.minimum + scene.maximum) * .5f;
+            const auto extent = scene.maximum - scene.minimum;
+            const float distance = std::max({extent.x, extent.y, extent.z, .01f}) * 1.5f;
+            view = glm::lookAt(center + distance * glm::vec3(std::sin(angle), 0, std::cos(angle)), center, glm::vec3(0, 1, 0));
+            args.target.view = view;
+            for (size_t i = 0; i < meshes.size(); ++i) transforms[i] = view * meshes[i].world;
+            check(cudaMemcpy(args.transforms, transforms.data(), transforms.size() * sizeof(glm::mat4), cudaMemcpyHostToDevice));
+        }
+        Json matrix = Json::array();
+        const auto clip = args.target.proj * view;
+        for (int row=0; row<4; ++row) for (int col=0; col<4; ++col) matrix.push_back(clip[col][row]);
+        cameras.push_back({{"frame",frame},{"azimuth_deg",options.azimuth+360.f*frame/options.frames},{"world_to_clip",matrix}});
+    for (int repeat = frame == 0 ? -2 : 0; repeat < options.repeat; ++repeat) {
         check(cudaMemcpy(args.target.framebuffer, pixels.data(), count * 8, cudaMemcpyHostToDevice));
         check(cudaEventRecord(start));
         for (auto function : functions)
@@ -306,16 +360,13 @@ Json render(const Scene& scene, const Options& options) {
         check(cudaEventElapsedTime(&elapsed, start, end));
         if (repeat >= 0) timings.push_back(elapsed);
     }
-    check(cudaEventDestroy(start)); check(cudaEventDestroy(end));
     check(cudaMemcpy(pixels.data(), args.target.framebuffer, count * 8, cudaMemcpyDeviceToHost));
-    const auto covered = std::count_if(pixels.begin(), pixels.end(), [](auto p) { return p != clearPixel; });
+    covered = std::count_if(pixels.begin(), pixels.end(), [](auto p) { return p != clearPixel; });
     if (!covered) throw std::runtime_error("Visibility correctness check failed: empty framebuffer");
-    uint32_t medium = 0, huge = 0;
     check(cudaMemcpy(&medium, args.nontrivialTrianglesCounter, 4, cudaMemcpyDeviceToHost));
     check(cudaMemcpy(&huge, args.hugeTrianglesCounter, 4, cudaMemcpyDeviceToHost));
     if (medium > MAX_NONTRIVIAL_TRIANGLES || huge > MAX_HUGE_TRIANGLES)
         throw std::runtime_error("Visibility queue exhausted; incomplete output discarded");
-    bool correct = true;
     if (scene.fixture) {
         correct = medium >= 2 && huge > 0;
         for (const auto& sample : std::array<std::array<int,3>,3>{{{{31,31,0}},{{70,70,1}},{{200,200,2}}}}) {
@@ -325,11 +376,11 @@ Json render(const Scene& scene, const Options& options) {
         correct &= pixels[size_t(500) * options.resolution + 500] == clearPixel;
         if (!correct) throw std::runtime_error("Three-stage fixture visibility/ID check failed");
     }
-    if (!options.dump.empty()) {
-        std::ofstream file(options.dump, std::ios::binary);
-        file.write(reinterpret_cast<const char*>(pixels.data()), std::streamsize(count * 8));
-        if (!file) throw std::runtime_error("Could not write visibility dump");
+    if (sequence.is_open()) {
+        sequence.write(reinterpret_cast<const char*>(pixels.data()), std::streamsize(count * 8));
+        if (!sequence) throw std::runtime_error("Could not write visibility sequence");
     }
+    } // frame; CUDA allocations and NVRTC module stay resident across the turntable
     if (!options.output.empty()) {
         std::ofstream file(options.output, std::ios::binary);
         file << "P6\n" << options.resolution << ' ' << options.resolution << "\n255\n";
@@ -341,6 +392,7 @@ Json render(const Scene& scene, const Options& options) {
         }
         if (!file) throw std::runtime_error("Could not write PPM");
     }
+    check(cudaEventDestroy(start)); check(cudaEventDestroy(end));
     std::sort(timings.begin(), timings.end());
     int driver = 0, runtime = 0, major = 0, minor = 0;
     check(cudaDriverGetVersion(&driver)); check(cudaRuntimeGetVersion(&runtime)); check(nvrtcVersion(&major, &minor));
@@ -350,19 +402,19 @@ Json render(const Scene& scene, const Options& options) {
         {"driver_api", driver}, {"cuda_runtime", runtime}, {"nvrtc", std::to_string(major) + "." + std::to_string(minor)},
         {"input", options.selfTest ? "three-stage-synthetic" : options.input.filename().string()},
         {"primitives", meshes.size()}, {"vertices", vertices}, {"triangles", triangles}, {"resolution", options.resolution},
-        {"repeat", options.repeat}, {"warmup", 2}, {"gpu_median_ms", timings[timings.size()/2]},
-        {"gpu_min_ms", timings.front()}, {"gpu_max_ms", timings.back()}, {"nvrtc_compile_seconds", module.compileSeconds},
+        {"frames", options.frames}, {"cameras", cameras}, {"repeat", options.repeat}, {"warmup", 2}, {"gpu_median_ms", timings[timings.size()/2]},
+        {"gpu_min_ms", timings.front()}, {"gpu_max_ms", timings.back()}, {"nvrtc_compile_seconds", module.compileSeconds}, {"ptx_cache_hit", module.cacheHit},
         {"covered_pixels", covered}, {"medium_queue", medium}, {"huge_tiles", huge},
         {"self_test_passed", scene.fixture ? Json(correct) : Json(nullptr)},
         {"timing_scope", "three visibility stages only; excludes clear, parse, uploads, compile and shading"},
-        {"material_policy", "opaque backface-culled visibility; no textures, material doubleSided or alpha evaluation"}};
+        {"material_policy", "opaque visibility; doubleSided via reversed triangles; shading in caller; no alpha evaluation"}};
 }
 int main(int argc, char** argv) {
     try {
         const auto options = parse(argc, argv);
         if (options.help) {
             std::cout << "curast-headless (--input static.glb | --self-test) [--resolution 512] [--repeat 31]\n"
-                         "  [--output visibility.ppm] [--dump packed-u64.bin] [--report result.json] [--device 0]\n"
+                         "  [--output visibility.ppm] [--dump packed-u64.bin] [--report result.json] [--device 0] [--frames 60] [--azimuth 0]\n"
                          "Separate flags and values with spaces. GPU architecture is selected at runtime.\n";
             return 0;
         }
