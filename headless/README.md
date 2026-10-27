@@ -56,3 +56,7 @@ Passing the fixture establishes portability of the tested core, not complete glT
 ## Licensing
 
 The integration and included CuRast kernels follow the upstream AGPL-3.0 terms. Dependencies retain their own licenses (fastgltf, simdjson/simdutf, GLM and nlohmann/json). No avatar assets are distributed with this fork.
+
+## Verified devices
+
+The Linux target has been built and executed on GeForce RTX4090 (Ada,8.9,CUDA13.0) and RTX PRO6000 Blackwell Workstation Edition (12.0,CUDA13.2). Both passed all three CTest cases and rendered real avatars at512/1024. The complete synthetic three-stage visibility frame was bit-identical across architectures. See [validation/README.md](validation/README.md) and its JSON receipts for exact scope and timing limits.

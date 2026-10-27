@@ -1,0 +1,15 @@
+{
+  "code_revision": "3063c5c45c6295e2ad0390409c5fad37c52faee6",
+  "fixture": "three-stage-synthetic,512x512",
+  "packed_visibility_bytes": 2097152,
+  "ada_sha256": "66b98bff15ca78e75f6896ac09d28f7c8e1b470200f2c926ba7b47db339eec34",
+  "blackwell_sha256": "66b98bff15ca78e75f6896ac09d28f7c8e1b470200f2c926ba7b47db339eec34",
+  "bit_identical": true,
+  "checked": "Complete packed uint64 frame, including source triangle IDs and depth, not only sample pixels",
+  "ada_ctest": "3/3 pass",
+  "blackwell_ctest": "3/3 pass",
+  "ada_avatar_sha256": "f54c52acee592ed4fe68beea89c3a72128de56c65c06b2896277a4e88fd61d61",
+  "blackwell_avatar_sha256": "cd55f2d8cacf9d1e1265b8a2ef2ddc05ff0f91c2e2f22f2ff6821863de09c28c",
+  "avatar_comparison": "Different canonical avatar builds on each host. These real-asset results establish portability, not a paired hardware speedup. No avatar assets are distributed.",
+  "scope": "Headless opaque backface-culled visibility only, no full viewer/material/gradient certification"
+}
